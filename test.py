@@ -12,7 +12,7 @@ from PIL import Image
 import queue
 import threading
 from ncatbot.core.element import MessageChain, Image
-import json 
+import json
 
 conversation_history = {}  # 存储群组对话历史 {group_id: messages}
 history_lock = threading.Lock()  # 保证线程安全
@@ -58,17 +58,17 @@ async def on_group_message(msg: GroupMessage):
         if len(parts) < 2:
             await bot.api.post_group_msg(
                 msg.group_id,
-                text=f"请指定预设角色，可选：{'/'.join(PRESET_ROLES.keys())}"
+                text=f"请指定预设角色，可选：{'/'.join(PRESET_ROLES.keys())}",
             )
             return
 
         role_name = parts[1].strip()
-        
+
         # 严格检查预设角色
         if role_name not in PRESET_ROLES:
             await bot.api.post_group_msg(
                 msg.group_id,
-                text = f"无效角色，请选择以下预设角色：{' '.join(PRESET_ROLES.keys())}"
+                text=f"无效角色，请选择以下预设角色：{' '.join(PRESET_ROLES.keys())}",
             )
             return
 
@@ -199,7 +199,7 @@ async def on_group_message(msg: GroupMessage):
         params = parts[1].split() if len(parts) > 1 else []
         num = 1
         keywords = []
-        
+
         # 提取num参数
         if params and params[0].isdigit():
             num = min(int(params[0]), 30)  # 限制最大30
@@ -208,7 +208,9 @@ async def on_group_message(msg: GroupMessage):
             keywords = params
 
         # 构建请求URL
-        base_url = f"https://image.anosu.top/pixiv/json?size=regular&num={num}&r18={r18_level}"
+        base_url = (
+            f"https://image.anosu.top/pixiv/json?size=regular&num={num}&r18={r18_level}"
+        )
         if keywords:
             keyword_param = "|".join(keywords)
             base_url += f"&keyword={keyword_param}"
@@ -216,36 +218,63 @@ async def on_group_message(msg: GroupMessage):
         retries = 3
         for attempt in range(retries):
             try:
-                async with httpx.AsyncClient(follow_redirects=True, timeout=60) as client:
-                    # 获取JSON数据
+                async with httpx.AsyncClient(
+                    follow_redirects=True, timeout=60
+                ) as client:
+                    # 1. 异步获取数据
                     response = await client.get(base_url)
                     response.raise_for_status()
-                    
-                    # 解析JSON数组
-                    data_list = response.json()
-                    
-                    # 验证响应格式
-                    if not isinstance(data_list, list) or len(data_list) == 0:
-                        raise ValueError("响应不是有效数组或数组为空")
-                    
-                    # 创建消息链
-                    images = []
-                    for item in data_list[:num]:  # 确保不超过请求数量
-                        if url := item.get("url"):
-                            images.append(Image(url))
-                        if len(images) >= 30:  # 二次保险防止超过限制
+
+                    # 2. 流式解析JSON
+                    data_list = []
+                    async for chunk in response.aiter_bytes():
+                        try:
+                            # 增量解析JSON
+                            partial_data = json.loads(chunk)
+                            if isinstance(partial_data, list):
+                                data_list.extend(partial_data)
+                            elif isinstance(partial_data, dict):
+                                data_list.append(partial_data)
+                        except json.JSONDecodeError:
+                            continue
+
+                    # 3. 分批发送图片
+                    batch_size = 5  # 每批发送5张
+                    sent_count = 0
+
+                    for i in range(0, min(len(data_list), num), batch_size):
+                        batch = data_list[i : i + batch_size]
+
+                        # 并行处理图片URL验证
+                        tasks = []
+                        for item in batch:
+                            tasks.append(_process_image_item(client, item))
+
+                        # 获取有效图片URL
+                        valid_urls = await asyncio.gather(*tasks)
+                        valid_urls = [url for url in valid_urls if url]
+
+                        # 构造并发送消息
+                        if valid_urls:
+                            message = MessageChain([Image(url) for url in valid_urls])
+                            await bot.api.post_group_msg(
+                                group_id=msg.group_id, rtf=message
+                            )
+                            sent_count += len(valid_urls)
+
+                        # 达到需求数量则提前退出
+                        if sent_count >= num:
                             break
-                    
-                    if not images:
+
+                    if sent_count == 0:
                         raise ValueError("未找到有效图片URL")
-                    
+
+                    break
+
                     # 发送图片消息链
                     message = MessageChain(images)
-                    await bot.api.post_group_msg(
-                        group_id=msg.group_id, 
-                        rtf=message
-                    )
-                    break
+                    await bot.api.post_group_msg(group_id=msg.group_id, rtf=message)
+                    
 
             except (TimeoutException, RemoteProtocolError, httpx.HTTPStatusError) as e:
                 _log.error(f"尝试 {attempt+1}/{retries} 失败: {str(e)}")
@@ -263,6 +292,22 @@ async def on_group_message(msg: GroupMessage):
                 group_id=msg.group_id, text="图片发送失败，请稍后再试"
             )
         return
+
+
+async def _process_image_item(client, item):  # 移除self参数
+    """异步验证并处理单个图片项"""
+    try:
+        url = item.get("url")
+        if not url:
+            return None
+
+        # 快速HEAD请求验证可用性
+        resp = await client.head(url, timeout=10)
+        if resp.status_code == 200:
+            return url
+        return None
+    except Exception:
+        return None
 
 
 @bot.private_event()
