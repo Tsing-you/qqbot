@@ -1,9 +1,10 @@
-from ncatbot.plugin import BasePlugin, CompatibleEnrollment
-from ncatbot.core.message import GroupMessage, PrivateMessage
-from ncatbot.core.element import MessageChain, Image
+import json
+import asyncio
 import httpx
-import re
-from urllib.parse import unquote, urlencode
+from httpx import AsyncClient, TimeoutException, HTTPStatusError, RemoteProtocolError
+from ncatbot.plugin import BasePlugin, CompatibleEnrollment
+from ncatbot.core.message import GroupMessage
+from ncatbot.core.element import MessageChain, Image
 
 bot = CompatibleEnrollment
 
@@ -11,142 +12,106 @@ bot = CompatibleEnrollment
 class ImageSearchPlugin(BasePlugin):
     name = "ImageSearchPlugin"
     version = "1.0.0"
+    requirements = ["httpx>=0.25.0"]
 
     async def on_load(self):
-        self.register_user_func(
-            name="search_image",
-            handler=self.handle_search,
-            raw_message_filter=r"^搜图\b",
-            permission_raise=True,
+        self.register_config("max_images", "30")
+        self.register_config(
+            "r18_mapping", json.dumps({"冲一发": 0, "冲两发": 2, "冲三发": 1})
         )
 
-    async def handle_search(self, msg):
-        base_params = {
-            "r18": 0,
-            "num": 1,
-            "tag": [],
-            "size": ["regular"],
-            "excludeAI": "false",
-            "uid": [],
-            "keyword": None,
-            "dateAfter": None,
-            "dateBefore": None,
-        }
-
-        # 参数解析逻辑
-        param_str = msg.raw_message.lstrip("搜图").strip()
-        args_queue = param_str.split()
-        current_key = None
-        parse_errors = []
-
-        while args_queue:
-            item = args_queue.pop(0)
-
-            # 识别参数名（必须是base_params的键或新字母组合）
-            if item in base_params or (re.match(r'^[a-zA-Z]+$', item) and len(item) <= 10):
-                if current_key:  # 前一个参数缺少值
-                    parse_errors.append(f"参数 {current_key} 缺少值")
-                current_key = item
-            else:
-                # 处理带引号的值
-                if item.startswith('"'):
-                    while args_queue and not item.endswith('"'):
-                        item += " " + args_queue.pop(0)
-                    item = item.strip('"')
-
-                if current_key:
-                    self._update_param(base_params, current_key, item, parse_errors)
-                    current_key = None
-                else:
-                    parse_errors.append(f"未识别的参数值: {item}")
-
-        # 错误处理
-        if parse_errors:
-            await msg.reply("参数解析错误：\n" + "\n".join(parse_errors))
-            return
-        if current_key:
-            await msg.reply(f"参数 {current_key} 缺少对应值")
+    @bot.group_event()
+    async def on_group_message(self, msg: GroupMessage):
+        parts = msg.raw_message.split(maxsplit=1)
+        if not parts:
             return
 
-        # 构建请求参数
-        query_params = []
-        valid_params = {
-            "r18",
-            "num",
-            "tag",
-            "size",
-            "excludeAI",
-            "uid",
-            "keyword",
-            "dateAfter",
-            "dateBefore",
-        }
-
-        for k in valid_params:
-            v = base_params.get(k)
-            if v is None:
-                continue
-            if isinstance(v, list):
-                for item in v:
-                    query_params.append((k, str(item)))
-            else:
-                query_params.append((k, str(v)))
-
-        # 生成URL
-        encoded_url = "https://api.lolicon.app/setu/v2?" + urlencode(
-            query_params, doseq=True
-        )
-        print(f"[DEBUG] 请求URL: {encoded_url}")
-
-        # 发送请求
-        async with httpx.AsyncClient() as client:
-            try:
-                resp = await client.get(encoded_url, timeout=20.0)
-                resp.raise_for_status()
-                data = resp.json()
-            except httpx.HTTPStatusError as e:
-                await msg.reply(f"API响应错误：{e.response.status_code}")
-                return
-            except Exception as e:
-                await msg.reply(f"请求失败：{str(e)}")
-                return
-
-        # 处理结果
-        if data.get("error"):
-            await msg.reply(f"API错误：{data['error']}")
+        command = parts[0].lower()
+        if command not in ["冲一发", "冲两发", "冲三发"]:
             return
 
-        images = []
-        target_size = base_params["size"][0] if base_params["size"] else "regular"
-        for item in data.get("data", [])[: base_params["num"]]:
-            if url := item["urls"].get(target_size):
-                images.append(Image(url))
-
-        if images:
-            # 修正后的代码
-            await msg.reply(rtf=MessageChain(images))
-        else:
-            await msg.reply("未找到符合要求的图片")
-
-    def _update_param(self, params, key, value, error_list):
-        """统一参数更新逻辑"""
         try:
-            value = unquote(value)
-            if key == "r18":
-                params[key] = max(0, min(2, int(value)))
-            elif key == "num":
-                params[key] = max(1, min(20, int(value)))
-            elif key in ["tag", "size", "uid"]:
-                params[key].append(value)
-            elif key == "excludeAI":
-                params[key] = "true" if value.lower() == "true" else "false"
-            elif key in ["dateAfter", "dateBefore"]:
-                params[key] = int(value)
-            elif key == "keyword":
-                params[key] = value
-            else:
-                error_list.append(f"未知参数: {key}")
-        except ValueError as e:
-            error_list.append(f"参数 {key} 的值不合法: {value}")
+            await self.handle_image_search(msg, command, parts)
         except Exception as e:
-            error_list.append(f"处理参数 {key} 时发生错误: {str(e)}")
+            await self.api.post_group_msg(
+                msg.group_id, text=f"图片搜索失败: {str(e)}"
+            )
+            await self.api.post_group_msg(msg.group_id, text="图片服务暂时不可用")
+
+    async def handle_image_search(self, msg, command, parts):
+        r18_mapping = json.loads(self.data["config"]["r18_mapping"])
+        max_images = int(self.data["config"]["max_images"])
+
+        r18_level = r18_mapping[command]
+        params = parts[1].split() if len(parts) > 1 else []
+
+        num = 1
+        if params and params[0].isdigit():
+            num = min(int(params[0]), max_images)
+            keywords = params[1:]
+        else:
+            keywords = params
+
+        base_url = (
+            f"https://image.anosu.top/pixiv/json?size=regular&num={num}&r18={r18_level}"
+        )
+        if keywords:
+            base_url += f"&keyword={'|'.join(keywords)}"
+
+        for attempt in range(3):
+            try:
+                async with AsyncClient(
+                    follow_redirects=True,
+                    timeout=60,
+                    limits=httpx.Limits(max_connections=10),
+                ) as client:
+                    response = await client.get(base_url)
+                    response.raise_for_status()
+                    data = response.json()
+
+                    valid_urls = await self.validate_urls(client, data)
+
+                    if not valid_urls:
+                        await self.api.post_group_msg(
+                            msg.group_id, text="未找到符合条件的图片"
+                        )
+                        return
+
+                    batch_size = 3
+                    for i in range(0, len(valid_urls), batch_size):
+                        batch = valid_urls[i : i + batch_size]
+                        if batch:
+                            await self.api.post_group_msg(
+                                msg.group_id,
+                                rtf=MessageChain([Image(url) for url in batch]),
+                            )
+                    return
+
+            except (TimeoutException, RemoteProtocolError, HTTPStatusError) as e:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(2 ** (attempt + 1))
+
+            except json.JSONDecodeError:
+                raise
+
+    async def validate_urls(self, client, data_list):
+        semaphore = asyncio.Semaphore(5)
+        tasks = []
+        for item in data_list:
+            url = item.get("url")
+            if url:
+                tasks.append(self.check_url_with_retry(client, url, semaphore))
+        results = await asyncio.gather(*tasks)
+        return [url for url in results if url]
+
+    async def check_url_with_retry(self, client, url, semaphore):
+        async with semaphore:
+            for retry in range(3):
+                try:
+                    resp = await client.head(url, timeout=15)
+                    if resp.status_code == 200:
+                        return url
+                except Exception:
+                    await asyncio.sleep(1)
+            return None
