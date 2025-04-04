@@ -77,7 +77,7 @@ class ImageSearchPlugin(BasePlugin):
                         )
                         return
 
-                    batch_size = 3
+                    batch_size = 1
                     for i in range(0, len(valid_urls), batch_size):
                         batch = valid_urls[i : i + batch_size]
                         if batch:
