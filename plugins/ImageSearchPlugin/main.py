@@ -70,59 +70,62 @@ class ImageSearchPlugin(BasePlugin):
         else:
             keywords = params
 
-        base_url = (
-            f"https://image.anosu.top/pixiv/json?size=regular&num={num}&r18={r18_level}"
-        )
-        if keywords:
-            base_url += f"&keyword={'|'.join(keywords)}"
+        valid_urls = []
+        remaining = num
 
-        for attempt in range(3):
+        while remaining > 0 and remaining <= max_images:
             try:
                 async with AsyncClient(
                     follow_redirects=True,
                     timeout=60,  # 增加超时时间
                     limits=httpx.Limits(max_connections=10),
                 ) as client:
+                    base_url = (
+                        f"https://image.anosu.top/pixiv/json?size=regular&num={remaining}&r18={r18_level}"
+                    )
+                    if keywords:
+                        base_url += f"&keyword={'|'.join(keywords)}"
+
                     response = await client.get(base_url)
                     response.raise_for_status()
                     data = response.json()
 
-                    valid_urls = await self.validate_urls(client, data, max_retries)
+                    batch_valid_urls = await self.validate_urls(client, data, max_retries)
+                    valid_urls.extend(batch_valid_urls)
 
-                    if not valid_urls:
-                        if isinstance(msg, GroupMessage):
-                            await self.api.post_group_msg(
-                                msg.group_id, text="未找到符合条件的图片"
-                            )
-                        else:
-                            await self.api.post_private_msg(
-                                msg.user_id, text="未找到符合条件的图片"
-                            )
-                        return
-
-                    batch_size = 1
-                    for i in range(0, len(valid_urls), batch_size):
-                        batch = valid_urls[i : i + batch_size]
-                        if batch:
-                            if isinstance(msg, GroupMessage):
-                                await self.api.post_group_msg(
-                                    msg.group_id,
-                                    rtf=MessageChain([Image(url) for url in batch]),
-                                )
-                            else:
-                                await self.api.post_private_msg(
-                                    msg.user_id,
-                                    rtf=MessageChain([Image(url) for url in batch]),
-                                )
-                    return
+                    remaining = num - len(valid_urls)
+                    if remaining <= 0:
+                        break
 
             except (TimeoutException, RemoteProtocolError, HTTPStatusError) as e:
-                if attempt == 2:
-                    raise
-                await asyncio.sleep(2 ** (attempt + 1))
+                self._log.error(f"图片请求失败: {str(e)}")
+                break
 
             except json.JSONDecodeError:
-                raise
+                self._log.error("图片数据解析失败")
+                break
+
+        if not valid_urls:
+            if isinstance(msg, GroupMessage):
+                await self.api.post_group_msg(msg.group_id, text="未找到符合条件的图片")
+            else:
+                await self.api.post_private_msg(msg.user_id, text="未找到符合条件的图片")
+            return
+
+        batch_size = 1
+        for i in range(0, len(valid_urls), batch_size):
+            batch = valid_urls[i : i + batch_size]
+            if batch:
+                if isinstance(msg, GroupMessage):
+                    await self.api.post_group_msg(
+                        msg.group_id,
+                        rtf=MessageChain([Image(url) for url in batch]),
+                    )
+                else:
+                    await self.api.post_private_msg(
+                        msg.user_id,
+                        rtf=MessageChain([Image(url) for url in batch]),
+                    )
 
     async def validate_urls(self, client, data_list, max_retries):
         semaphore = asyncio.Semaphore(5)
