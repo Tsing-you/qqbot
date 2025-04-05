@@ -36,7 +36,7 @@ class AIRolePlay(BasePlugin):
         self.history_lock = threading.Lock()
         self.MAX_HISTORY_ROUNDS = 7
         self.client = ZhipuAI(
-            api_key="62aca7a83e7a40308d2f4f51516884bc.J91FkaxCor4k3sDk"
+            api_key="************"
         )
 
     async def on_load(self):
