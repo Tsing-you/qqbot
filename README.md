@@ -9,7 +9,7 @@
 
 本bot基于NcatBot 和 Napcat框架，在扶摇云上使用Ubuntu挂载，实现Bot 的功能。
 
-对于搭建机器人，建议参考https://docs.ncatbot.xyz/。
+对于搭建机器人，建议参考https://docs.ncatbot.xyz/
 
 ai对话使用的是智谱清言的api，目前免费，大可自行领取。
 
