@@ -27,7 +27,13 @@ class AIRolePlay(BasePlugin):
         self.role_settings = {}
         self.history_lock = threading.Lock()
         self.MAX_HISTORY_ROUNDS = 7
+<<<<<<< HEAD
         self.client = ZhipuAI(api_key="62aca7a83e7a40308d2f4f51516884bc.J91FkaxCor4k3sDk")
+=======
+        self.client = ZhipuAI(
+            api_key="************"
+        )
+>>>>>>> 0b5e5d7bdbd2539c2415ffca956fd920b227bb40
 
     async def on_load(self):
         _log.info(f"{self.name} plugin loaded")
