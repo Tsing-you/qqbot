@@ -8,33 +8,33 @@ from ncatbot.core.element import MessageChain, Image
 
 bot = CompatibleEnrollment
 
-
 class ImageSearchPlugin(BasePlugin):
     name = "ImageSearchPlugin"
     version = "1.0.0"
     requirements = ["httpx>=0.25.0"]
 
     async def on_load(self):
+        """插件加载时初始化配置并注册事件"""
+        # 注册消息事件处理
+        self.register_handler("ncatbot.group_message_event", self.handle_message)
+        self.register_handler("ncatbot.private_message_event", self.handle_message)
+
+        # 配置初始化
         self.register_config("max_images", "30")
         self.register_config(
             "r18_mapping", json.dumps({"冲一发": 0, "冲两发": 2, "冲三发": 1})
         )
         self.register_config("max_retries", "3")  # 新增重试次数配置
 
-    @bot.group_event()
-    async def on_group_message(self, msg: GroupMessage):
-        await self.handle_message(msg)
+        print(f"{self.name} v{self.version} 已加载")
 
-    @bot.private_event()
-    async def on_private_message(self, msg: PrivateMessage):
-        await self.handle_message(msg)
+    async def handle_message(self, event):
+        """统一的消息处理入口"""
+        msg = event.data
+        if not isinstance(msg, (GroupMessage, PrivateMessage)):
+            return
 
-    async def handle_message(self, msg):
-        if isinstance(msg, GroupMessage):
-            parts = msg.raw_message.split(maxsplit=1)
-        else:
-            parts = msg.raw_message.split(maxsplit=1)
-
+        parts = msg.raw_message.split(maxsplit=1)
         if not parts:
             return
 
@@ -43,26 +43,18 @@ class ImageSearchPlugin(BasePlugin):
             return
 
         try:
-            await self.handle_image_search(msg, command, parts)
+            await self.process_image_search(msg, command, parts)
         except Exception as e:
-            if isinstance(msg, GroupMessage):
-                await self.api.post_group_msg(
-                    msg.group_id, text=f"图片搜索失败: {str(e)}"
-                )
-            else:
-                await self.api.post_private_msg(
-                    msg.user_id, text=f"图片搜索失败: {str(e)}"
-                )
-            await self.api.post_group_msg(msg.group_id, text="图片服务暂时不可用")
+            await self.send_response(msg, f"图片搜索失败: {str(e)}")
 
-    async def handle_image_search(self, msg, command, parts):
+    async def process_image_search(self, msg, command, parts):
+        """核心图片搜索逻辑"""
         r18_mapping = json.loads(self.data["config"]["r18_mapping"])
-        max_images = int(self.data["config"]["max_images"])
-        max_retries = int(self.data["config"]["max_retries"])  # 获取最大重试次数
-
         r18_level = r18_mapping[command]
-        params = parts[1].split() if len(parts) > 1 else []
+        max_images = int(self.data["config"]["max_images"])
+        max_retries = int(self.data["config"]["max_retries"])
 
+        params = parts[1].split() if len(parts) > 1 else []
         num = 1
         if params and params[0].isdigit():
             num = min(int(params[0]), max_images)
@@ -75,14 +67,18 @@ class ImageSearchPlugin(BasePlugin):
 
         while remaining > 0 and remaining <= max_images:
             try:
+                headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36",
+    "Referer": "https://image.anosu.top/"
+}
+
                 async with AsyncClient(
+                    headers=headers,
                     follow_redirects=True,
-                    timeout=60,  # 增加超时时间
-                    limits=httpx.Limits(max_connections=10),
+                    timeout=60,
+                    limits=httpx.Limits(max_connections=10)
                 ) as client:
-                    base_url = (
-                        f"https://image.anosu.top/pixiv/json?size=regular&num={remaining}&r18={r18_level}"
-                    )
+                    base_url = f"https://image.anosu.top/pixiv/json?size=regular&num={remaining}&r18={r18_level}"
                     if keywords:
                         base_url += f"&keyword={'|'.join(keywords)}"
 
@@ -92,42 +88,34 @@ class ImageSearchPlugin(BasePlugin):
 
                     batch_valid_urls = await self.validate_urls(client, data, max_retries)
                     valid_urls.extend(batch_valid_urls)
-
                     remaining = num - len(valid_urls)
-                    if remaining <= 0:
-                        break
 
             except (TimeoutException, RemoteProtocolError, HTTPStatusError) as e:
-                self._log.error(f"图片请求失败: {str(e)}")
+                # self._log.error(f"图片请求失败: {str(e)}")
                 break
 
             except json.JSONDecodeError:
-                self._log.error("图片数据解析失败")
+                # self._log.error("图片数据解析失败")
                 break
 
         if not valid_urls:
-            if isinstance(msg, GroupMessage):
-                await self.api.post_group_msg(msg.group_id, text="未找到符合条件的图片")
-            else:
-                await self.api.post_private_msg(msg.user_id, text="未找到符合条件的图片")
+            await self.send_response(msg, "未找到符合条件的图片")
             return
 
-        batch_size = 1
-        for i in range(0, len(valid_urls), batch_size):
-            batch = valid_urls[i : i + batch_size]
-            if batch:
-                if isinstance(msg, GroupMessage):
-                    await self.api.post_group_msg(
-                        msg.group_id,
-                        rtf=MessageChain([Image(url) for url in batch]),
-                    )
-                else:
-                    await self.api.post_private_msg(
-                        msg.user_id,
-                        rtf=MessageChain([Image(url) for url in batch]),
-                    )
+        for batch in [valid_urls[i:i+1] for i in range(0, len(valid_urls), 1)]:
+            if isinstance(msg, GroupMessage):
+                await self.api.post_group_msg(
+                    msg.group_id,
+                    rtf=MessageChain([Image(url) for url in batch])
+                )
+            else:
+                await self.api.post_private_msg(
+                    msg.user_id,
+                    rtf=MessageChain([Image(url) for url in batch])
+                )
 
     async def validate_urls(self, client, data_list, max_retries):
+        """并发验证图片URL有效性"""
         semaphore = asyncio.Semaphore(5)
         tasks = []
         for item in data_list:
@@ -138,6 +126,7 @@ class ImageSearchPlugin(BasePlugin):
         return [url for url in results if url]
 
     async def check_url_with_retry(self, client, url, semaphore, max_retries):
+        """带重试机制的URL验证"""
         async with semaphore:
             for retry in range(max_retries):
                 try:
@@ -145,8 +134,18 @@ class ImageSearchPlugin(BasePlugin):
                     if resp.status_code == 200:
                         return url
                 except (TimeoutException, RemoteProtocolError, HTTPStatusError) as e:
-                    if retry == max_retries - 1:
-                        self._log.error(f"URL请求失败: {str(e)} URL: {url}")
-                        return None
+                    # if retry == max_retries - 1:
+                    #     self._log.error(f"URL请求失败: {str(e)} URL: {url}")
                     await asyncio.sleep(1)
             return None
+
+    async def send_response(self, msg, content):
+        """统一消息发送逻辑"""
+        if isinstance(msg, GroupMessage):
+            await self.api.post_group_msg(msg.group_id, text=content)
+        else:
+            await self.api.post_private_msg(msg.user_id, text=content)
+
+    async def on_unload(self):
+        """插件卸载时触发"""
+        print(f"{self.name} 插件已卸载")
