@@ -75,14 +75,15 @@ class ImageSearchPlugin(BasePlugin):
                 async with AsyncClient(
                     headers=headers,
                     follow_redirects=True,
-                    timeout=60,
+                    # timeout=60,
+                    timeout=httpx.Timeout(connect=60, read=120, write=60,pool=10),
                     limits=httpx.Limits(max_connections=10)
                 ) as client:
                     base_url = f"https://image.anosu.top/pixiv/json?size=regular&num={remaining}&r18={r18_level}"
                     if keywords:
                         base_url += f"&keyword={'|'.join(keywords)}"
 
-                    response = await client.get(base_url)
+                    response = await client.get(base_url)  #####
                     response.raise_for_status()
                     data = response.json()
 
@@ -116,7 +117,7 @@ class ImageSearchPlugin(BasePlugin):
 
     async def validate_urls(self, client, data_list, max_retries):
         """并发验证图片URL有效性"""
-        semaphore = asyncio.Semaphore(5)
+        semaphore = asyncio.Semaphore(1)
         tasks = []
         for item in data_list:
             url = item.get("url")
@@ -136,7 +137,7 @@ class ImageSearchPlugin(BasePlugin):
                 except (TimeoutException, RemoteProtocolError, HTTPStatusError) as e:
                     # if retry == max_retries - 1:
                     #     self._log.error(f"URL请求失败: {str(e)} URL: {url}")
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(2)
             return None
 
     async def send_response(self, msg, content):
